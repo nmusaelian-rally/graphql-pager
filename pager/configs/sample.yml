@@ -1,0 +1,7 @@
+Github:
+    server:       https://api.github.com/graphql
+    port:         443
+    user:         fantomas
+    token:        f00
+    organization: LouisDeFunes
+    pagesize:     100
