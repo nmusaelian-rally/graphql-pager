@@ -3,6 +3,7 @@ import requests
 import yaml
 from collections import OrderedDict
 from pprint import pprint
+import re
 
 def pretty(data):
     for repo in data:
@@ -48,21 +49,23 @@ class Pager:
 
     def constructQuery(self):
         if not self.cursor:
-            query = "{search(first: %s, type: REPOSITORY, query: \"user:%s pushed:>2015-04-05T06:00:00Z\"){" \
+            query = "{search(first: %s, type: REPOSITORY, query: \"user:%s pushed:>2017-04-05T06:00:00Z\"){" \
                     "edges {node {... on Repository{" \
                     "id name pushedAt ref(qualifiedName:\"master\"){" \
-                    "target{... on Commit{history(first:3, since:\"2015-04-05T06:00:00Z\"){" \
+                    "target{... on Commit{history(first:3, since:\"2017-04-05T06:00:00Z\"){" \
                     "edges{node{message oid committer{name} committedDate tree{entries{name}} }}}}}}}}" \
                     "cursor}pageInfo{hasNextPage}repositoryCount}}" \
                     % (self.pagesize, self.organization)
         else:
-            query = "{search(first: %s, after: \"%s\", type: REPOSITORY, query: \"user:%s pushed:>2015-04-05T06:00:00Z\"){" \
+            query = "{search(first: %s, after: \"%s\", type: REPOSITORY, query: \"user:%s pushed:>2017-04-05T06:00:00Z\"){" \
                     "edges {node {... on Repository{" \
                     "id name pushedAt ref(qualifiedName:\"master\"){" \
-                    "target{... on Commit{history(first:3, since:\"2015-04-05T06:00:00Z\"){" \
+                    "target{... on Commit{history(first:3, since:\"2017-04-05T06:00:00Z\"){" \
                     "edges{node{message oid committer{name} committedDate tree{entries{name}} }}}}}}}}" \
                     "cursor}pageInfo{hasNextPage}repositoryCount}}" \
                     % (self.pagesize, self.cursor, self.organization)
+
+
         return query
 
     def madConstructQuery(self, branch, ref_time):
@@ -72,53 +75,90 @@ class Pager:
             Is it possible to use an OrderedDict, push keys/vals in at the appropriate levels and then turn into
             JSON via json.load().dump() ?
         """
-        paging_info = 'after: "%s",' % () if self.cursor else ''
+        query = """\
+              {search(first: %s, type: REPOSITORY, query: "user:%s pushed:>2015-04-05T06:00:00Z"){
+                edges {node {
+                ... on Repository{
+                id name pushedAt ref(qualifiedName:"master"){
+                target{
+                ... on Commit{history(first:3, since:"2015-04-05T06:00:00Z"){
+                edges{node{message oid committer{name} committedDate tree{entries{name}} }}}}}}}}
+                cursor}pageInfo{hasNextPage}repositoryCount}} """ % (self.pagesize, self.organization)
+
+        paging_info = 'after: "%s",' % (self.cursor) if self.cursor else ''
         qd = {}
         qd['search'] = 'search(first: %s, %s type: REPOSITORY, query: \"user:%s pushed:>%s\")' % (self.pagesize, paging_info, self.organization, self.lookback)
+        qd['repositories'] = 'edges {node {... on Repository{'
         ed = {'node' : ''}
         qd['foop']   = []
         return json.dumps(qd)
 
 
+    def repoCommits(self, repo):
+        zero_commits = []
+        levels = ['node', 'ref', 'target', 'history', 'edges']
+        struct = repo
+        for level in levels:
+            if struct.get(level, None):
+                struct = struct[level]
+            else:
+                return zero_commits
+        return struct   # if we're here then all the levels are present and at the end it is a list of None or some commits
 
+    def getCommitInfo(self, commit_node):
+        commit = OrderedDict()
+        commit['date'] = commit_node['committedDate']
+        commit['sha']  = commit_node['oid']
+        commit['committer'] = commit_node['committer']['name']
+        if commit_node.get('message', False):
+            commit['message'] = commit_node['message']
+        else:
+            commit['message'] = ""
 
+        # levels = ['tree','entries']
+        # struct = commit_node
+        # for level in levels:
+        #     if struct.get(level,None):
+        #         struct = struct[level]
 
+        if commit_node.get('tree', False) and commit_node['tree'].get('entries', False):
+            files = [file['name'] for file in commit_node['tree']['entries']]
+            files = ', '.join(f for f in files)
+            commit['files'] = files
+        else:
+            commit['files'] = []
+        return commit
 
     def getPage(self):
         while self.next_page:
             query = self.constructQuery()
             result = requests.post(self.url, json.dumps({"query": query}), auth=(self.user, self.token))
             r = result.json()['data']['search']
-            pprint (r)
-            self.repositoryCount = r['repositoryCount']
-            repositories = r['edges']
-            self.next_page = r['pageInfo']['hasNextPage']
+
+            pprint (r['edges'], indent=2, width=220)
+
+            self.repositoryCount = r['repositoryCount']  # should be the same on all pages, this is the total count for the query
+            repositories = r['edges']  # these are repositories mentioned on this specific page
+
+            self.next_page = r['pageInfo']['hasNextPage']  # on the last page this will be False
 
             for repo in repositories:
                 self.last_id = repositories[-1]['node']['id']
                 repo_commits = []
                 repo_node = OrderedDict({repo['node']['name']: {'pushedAt': repo['node']['pushedAt'], 'commits': repo_commits}})
-                #reop_node['node'] =
+                commits = self.repoCommits(repo)
+                if not commits:
+                    continue
 
                 self.all.append(repo_node)
-                commits = repo['node']['ref']['target']['history']['edges']
-                for commit in commits:
+                for commit_struct in commits:
+                    commit = self.getCommitInfo(commit_struct['node'])
+                    repo_commits.append(commit)
 
-                    commit_node = OrderedDict()
-                    #commit_node['date']      = commit['node']['committer']['date']
-                    commit_node['date']      = commit['node']['committedDate']
-                    commit_node['sha']       = commit['node']['oid']
-                    commit_node['committer'] = commit['node']['committer']['name']
-                    commit_node['message']   = commit['node']['message']
-                    files = [file['name'] for file in commit['node']['tree']['entries']]
-                    files = ', '.join(f for f in files)
-                    commit_node['files']     = files
-                    repo_commits.append(commit_node)
-
-                if repo['node']['id'] == self.last_id and self.next_page:
-                    print("cursor: %s" % repo['cursor'])
-                    self.cursor = repo['cursor']
-                    self.getPage()
+            if repo['node']['id'] == self.last_id and self.next_page:
+                print("cursor: %s" % repo['cursor'])
+                self.cursor = repo['cursor']
+                self.getPage()
 
 config = "configs/test.yml"
 pager = Pager(config)
