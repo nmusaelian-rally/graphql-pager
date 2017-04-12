@@ -1,9 +1,12 @@
 import json
 import requests
 import yaml
+from datetime import datetime, timedelta
+import time
 from collections import OrderedDict
 from pprint import pprint
 import re
+import sys
 
 def pretty(data):
     for repo in data:
@@ -53,18 +56,18 @@ class Pager:
 
     def constructRepoQuery(self):
         if not self.repo_cursor:
-            query = "{search(first: %s, type: REPOSITORY, query: \"user:%s pushed:>2017-04-05T06:00:00Z\"){" \
+            query = "{search(first: %s, type: REPOSITORY, query: \"user:%s pushed:>2017-04-10T06:00:00Z\"){" \
                     "edges {node {... on Repository{" \
                     "id name pushedAt ref(qualifiedName:\"master\"){" \
-                    "target{... on Commit{history(first:3, since:\"2017-04-05T06:00:00Z\"){" \
+                    "target{... on Commit{history(first:3, since:\"2017-04-10T06:00:00Z\"){" \
                     "edges{node{message oid committer{name} committedDate tree{entries{name}} }}}}}}}}" \
                     "cursor}pageInfo{hasNextPage}repositoryCount}}" \
                     % (self.pagesize, self.organization)
         else:
-            query = "{search(first: %s, after: \"%s\", type: REPOSITORY, query: \"user:%s pushed:>2017-04-05T06:00:00Z\"){" \
+            query = "{search(first: %s, after: \"%s\", type: REPOSITORY, query: \"user:%s pushed:>2017-04-10T06:00:00Z\"){" \
                     "edges {node {... on Repository{" \
                     "id name pushedAt ref(qualifiedName:\"master\"){" \
-                    "target{... on Commit{history(first:3, since:\"2017-04-05T06:00:00Z\"){" \
+                    "target{... on Commit{history(first:3, since:\"2017-04-10T06:00:00Z\"){" \
                     "edges{node{message oid committer{name} committedDate tree{entries{name}} }}}}}}}}" \
                     "cursor}pageInfo{hasNextPage}repositoryCount}}" \
                     % (self.pagesize, self.repo_cursor, self.organization)
@@ -77,13 +80,13 @@ class Pager:
         if not self.commit_cursor:
             query = "{repository(owner: \"%s\", name: \"%s\") {" \
                     "... on Repository{ref(qualifiedName:\"master\"){" \
-                    "target{... on Commit{history(first:%s,since:\"2017-04-01T06:00:00Z\"){" \
+                    "target{... on Commit{history(first:%s,since:\"2017-04-10T06:00:00Z\"){" \
                     "edges{node{oid id}cursor}pageInfo{hasNextPage}}}}}}}}" \
                      % (self.organization, repo, self.pagesize)
         else:
             query = "{repository(owner: \"%s\", name: \"%s\") {" \
                     "... on Repository{ref(qualifiedName:\"master\"){" \
-                    "target{... on Commit{history(first:%s,since:\"2017-04-01T06:00:00Z\", after: \"%s\"){" \
+                    "target{... on Commit{history(first:%s,since:\"2017-04-10T06:00:00Z\", after: \"%s\"){" \
                     "edges{node{oid id}cursor}pageInfo{hasNextPage}}}}}}}}" \
                     % (self.organization, repo, self.pagesize, self.commit_cursor)
 
@@ -138,7 +141,7 @@ class Pager:
 
     def repoCommits(self, repo):
         zero_commits = []
-        levels = ['node', 'ref', 'target', 'history', 'edges']
+        levels = ['ref', 'target', 'history', 'edges']
         struct = repo
         for level in levels:
             if struct.get(level, None):
@@ -148,7 +151,7 @@ class Pager:
         return struct   # if we're here then all the levels are present and at the end it is a list of None or some commits
 
 
-    def jpiscrazy(self, result):
+    def validateCommitStructure(self, result):
         zero_commits = []
         levels = ['data','repository','ref','target','history']
         struct = result
@@ -183,11 +186,7 @@ class Pager:
             query = self.constructCommitsQuery(repo)
             result = requests.post(self.url, json.dumps({"query": query}), auth=(self.user, self.token))
             r = result.json()
-            r = self.jpiscrazy(r)
-            #r = r['data']['repository']['ref']['target']['history']
-            # print ('################ commits of %s repository' %repo)
-            # pprint (r['edges'], indent=2, width=220)
-            # print('################')
+            r = self.validateCommitStructure(r)
             commits = r['edges']
             self.last_commit_id = commits[-1]['node']['id']
             self.commits_next_page = r['pageInfo']['hasNextPage']
@@ -202,60 +201,102 @@ class Pager:
         self.commits_next_page = True
         self.commit_cursor     = None
 
+    def processARepo(self, repo):
+        repo = repo['node']
+        #repo_node = OrderedDict({repo['name']: {'pushedAt': repo['pushedAt']}})
+        commits = self.repoCommits(repo)
+        if not commits:
+            print("THERE ARE NO COMMITS!!!!!!!!")
+            return
+
+        commits = []
+        self.getCommitsPage(repo['name'], commits)
+        self.resetCommitsPageDefaults()
+
+        return commits
+
+
     def getRepoPage(self):
         while self.repos_next_page:
             query = self.constructRepoQuery()
             #query = self.madConstructQuery(ref_time)
-            result = requests.post(self.url, json.dumps({"query": query}), auth=(self.user, self.token))
-            r = result.json()['data']['search']
+            response = requests.post(self.url, json.dumps({"query": query}), auth=(self.user, self.token))
+            r = response.json()['data']['search']
 
             #pprint (r['edges'], indent=2, width=220)
 
             self.repositoryCount = r['repositoryCount']  # should be the same on all pages, this is the total count for the query
             repositories = r['edges']  # these are repositories mentioned on this specific page
+            self.last_id = repositories[-1]['node']['id']
 
             self.repos_next_page = r['pageInfo']['hasNextPage']  # on the last page this will be False
 
             for repo in repositories:
-                self.last_id = repositories[-1]['node']['id']
-                #repo_commits = []
-                #repo_node = OrderedDict({repo['node']['name']: {'pushedAt': repo['node']['pushedAt'], 'commits': repo_commits}})
-                repo_node = OrderedDict({repo['node']['name']: {'pushedAt': repo['node']['pushedAt']}})
-                commits = self.repoCommits(repo)
-                if not commits:
-                    print("THERE ARE NO COMMITS!!!!!!!!")
-                    continue
-
-
-                commits = []
-                self.repo_commit_shas[repo['node']['name']] = []
-                #self.commits_next_page = real_value_at_this_point
-                self.getCommitsPage(repo['node']['name'], commits)
-                self.repo_commit_shas[repo['node']['name']] = commits
-                self.resetCommitsPageDefaults()
-                with open('shas.txt', 'a') as f:
-                    pprint(self.repo_commit_shas, stream=f)
-
-                #print(self.repo_commit_shas, file=open('shas.txt','a'))
-
-                self.all.append(repo_node)
-                # for commit_struct in commits:
-                #     commit = self.getCommitInfo(commit_struct['node'])
-                #     repo_commits.append(commit)
+                #if self.processThisRepo(repo['node']['name'])
+                if repo['node']['name'] != "database_connector":
+                    #self.repo_commit_shas[repo['node']['name']] = []
+                    commits = self.processARepo(repo)
+                    self.repo_commit_shas[repo['node']['name']] = commits
 
                 if repo['node']['id'] == self.last_id and self.repos_next_page:
                     print("cursor: %s" % repo['cursor'])
+                    sys.stdout.flush()
                     self.repo_cursor = repo['cursor']
                     self.getRepoPage()
 
+    def inflateCommits(self):
+        commit_endpoint = "repos/<org_name>/<repo_name>/commits/<sha>"
+        github = "https://api.github.com/"
+        for repo_name, shas in self.repo_commit_shas.items():
+            for sha in shas:
+                commit_url = commit_endpoint.replace('<org_name>', self.organization).replace('<repo_name>', repo_name).replace('<sha>', sha)
+                full_url = github + commit_url
+                response = requests.get(full_url, auth=(self.user, self.token))
+                ghc = GithubCommit(response, repo_name, sha)
+                if ghc.status == 403:
+                    print("Request denied: RateLimit: %s  Remaining:%s  RateReset: %s" % (ghc.rate_limit, ghc.remaining, ghc.reset_time))
+                elif ghc.status != 200:
+                    print("You bonehead!  You goofed up the request...")
+                else:
+                    print(ghc)
+                sys.stdout.flush()
+
+
+
+class GithubCommit:
+    def __init__(self, response, repo_name, sha):
+        self.sha = sha
+        self.repo_name = repo_name
+        self.status = response.status_code
+
+        if response.status_code in [200, 403]:
+            store = response.headers._store
+            self.rate_limit = store['x-ratelimit-limit'][1]
+            self.remaining = store['x-ratelimit-remaining'][1]
+            reset_time = store['x-ratelimit-reset'][1]
+            self.reset_time = datetime.fromtimestamp(int(reset_time))
+
+        if response.status_code == 200:
+            result = response.json()
+            commit_info = result['commit']
+            committer = commit_info['committer']
+            self.timestamp = committer['date']
+            self.committer = (committer['name'], committer['email'])
+            self.message   = commit_info['message']
+            self.involved_files = [(file['status'], file['filename']) for file in result['files']]
+
+    def __str__(self):
+        return "%s - %s %s %s %s %s" % (self.repo_name, self.sha, self.timestamp, repr(self.committer), self.message[:50], repr(self.involved_files))
+
+
 config = "configs/test.yml"
 pager = Pager(config)
-pager.getRepoPage()
 
+
+pager.getRepoPage()
+pager.inflateCommits()
 
 print("Repository Count: %s" % pager.repositoryCount)
-pretty(pager.all)
+#pretty(pager.all)
 
 
-print("\nLength of list of repos: %s must be the same as totalCount: %s " %(len(pager.all), pager.repositoryCount))
-assert len(pager.all) == pager.repositoryCount
