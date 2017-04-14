@@ -18,10 +18,10 @@ EXCLUSIONS = ['georgetest*', 'connortest*', 'clitest*']
 
 def main(args):
 
-    config = "configs/test.yml"
+    config = "configs/verglas.yml"
     pager = Pager(config)
 
-    pager.processActiveRepositories('2017-04-08T12:15:30Z', 10)
+    pager.processActiveRepositories('2017-04-11T07:00:30Z', 10)
     pager.inflateCommits()
 
     print("Repository Count: %s" % pager.repositoryCount)
@@ -105,25 +105,27 @@ class Pager:
         """
         cursor_clause = ', after: "%s"' % cursor if cursor else ''
         query = \
-            """{ repository(owner: "%s", name: "%s") {
-                   ... on Repository {
-                      ref(qualifiedName:"%s") {
-                        target {
-                           ... on Commit {
-                              history(first:%s,since:"%s"%s) {
-                                edges {
-                                  node {oid id}
-                                  cursor
-                                }
-                                pageInfo{hasNextPage}
-                              }
-                           }
+            """
+            { repository(owner: "%s", name: "%s") {
+                ... on Repository {
+                  ref(qualifiedName:"%s") {
+                    target {
+                      ... on Commit {
+                        history(first:%s,since:"%s"%s) {
+                          edges {
+                            node {oid id}
+                            cursor
+                          }
+                          pageInfo{hasNextPage}
                         }
-                     }
-                   }
-               }
+                      }
+                    }
+                  }
+                }
               }
-            """  % (self.organization, repo, branch, self.pagesize, ref_time, cursor_clause, self.commit_cursor)
+            }
+            """  % (self.organization, repo, branch, self.pagesize, ref_time, cursor_clause)
+        return textwrap.dedent(query[1:])
 
 
     def altConstructQuery(self, ref_time, commit_count, branch='master', cursor=None):
@@ -273,8 +275,9 @@ class Pager:
 
     def getCommitsPage(self, repo, ref_time, repo_commits, cursor=None):
         while self.next_commits_page:
-            query = self.constructCommitsQuery(repo)
-            #alt_query = self.altConstructCommitsQuery(repo, ref_time, branch=, cursor=)
+            #query     = self.constructCommitsQuery(repo)
+            #response = requests.post(self.url, json.dumps({"query": query}), auth=(self.user, self.token))
+            query = self.altConstructCommitsQuery(repo, ref_time, branch='master', cursor=cursor)
             response = requests.post(self.url, json.dumps({"query": query}), auth=(self.user, self.token))
             result = response.json()
             result = self.validateCommitStructure(result)
