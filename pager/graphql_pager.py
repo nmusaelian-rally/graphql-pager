@@ -1,13 +1,13 @@
-import sys
-from datetime    import datetime, timedelta
-from collections import OrderedDict
+import sys, os
 import json
 import re
-import textwrap
 from pprint import pprint
 
 import yaml
 import requests
+
+from graphql_query import GraphQL_Query
+from github_commit import GithubCommit
 
 ######################################################################################
 
@@ -17,8 +17,19 @@ EXCLUSIONS = ['georgetest*', 'connortest*', 'clitest*']
 #######################################################################################
 
 def main(args):
+    if not args:
+        print("ERROR: You must provide the base name of a config file to be found in the configs subdir")
+        sys.exit(1)
+    conf_name = args.pop(0)
 
-    config = "configs/verglas.yml"
+    if conf_name.endswith('.yml'):
+        config = "configs/%s" % conf_name
+    else:
+        config = "configs/%s.yml" % conf_name
+    if not os.path.exists(config):
+        print("ERROR: unable to find a config file associated with %s" % conf_name)
+        sys.exit(2)
+
     pager = Pager(config)
 
     pager.processActiveRepositories('2017-04-11T07:00:30Z', 10)
@@ -61,168 +72,6 @@ class Pager:
         self.user         = github['user']
         self.token        = github['token']
         self.lookback     = github['lookback']
-
-
-    def constructRepoQuery(self):
-        if not self.repo_cursor:
-            query = "{search(first: %s, type: REPOSITORY, query: \"user:%s pushed:>2017-04-10T06:00:00Z\"){" \
-                    "edges {node {... on Repository{" \
-                    "id name pushedAt ref(qualifiedName:\"master\"){" \
-                    "target{... on Commit{history(first:3, since:\"2017-04-10T06:00:00Z\"){" \
-                    "edges{node{message oid committer{name} committedDate tree{entries{name}} }}}}}}}}" \
-                    "cursor}pageInfo{hasNextPage}repositoryCount}}" \
-                    % (self.pagesize, self.organization)
-        else:
-            query = "{search(first: %s, after: \"%s\", type: REPOSITORY, query: \"user:%s pushed:>2017-04-10T06:00:00Z\"){" \
-                    "edges {node {... on Repository{" \
-                    "id name pushedAt ref(qualifiedName:\"master\"){" \
-                    "target{... on Commit{history(first:3, since:\"2017-04-10T06:00:00Z\"){" \
-                    "edges{node{message oid committer{name} committedDate tree{entries{name}} }}}}}}}}" \
-                    "cursor}pageInfo{hasNextPage}repositoryCount}}" \
-                    % (self.pagesize, self.repo_cursor, self.organization)
-        return query
-
-
-    def constructCommitsQuery(self, repo):
-        if not self.commit_cursor:
-            query = "{repository(owner: \"%s\", name: \"%s\") {" \
-                    "... on Repository{ref(qualifiedName:\"master\"){" \
-                    "target{... on Commit{history(first:%s,since:\"2017-04-10T06:00:00Z\"){" \
-                    "edges{node{oid id}cursor}pageInfo{hasNextPage}}}}}}}}" \
-                     % (self.organization, repo, self.pagesize)
-        else:
-            query = "{repository(owner: \"%s\", name: \"%s\") {" \
-                    "... on Repository{ref(qualifiedName:\"master\"){" \
-                    "target{... on Commit{history(first:%s,since:\"2017-04-10T06:00:00Z\", after: \"%s\"){" \
-                    "edges{node{oid id}cursor}pageInfo{hasNextPage}}}}}}}}" \
-                    % (self.organization, repo, self.pagesize, self.commit_cursor)
-        return query
-
-    def altConstructCommitsQuery(self, repo, ref_time, branch='master', cursor=None):
-        """
-            construct a GraphSQL compliant query to get commit related info for commits
-            that were done past a specific time on a specific branch.
-        """
-        cursor_clause = ', after: "%s"' % cursor if cursor else ''
-        query = \
-            """
-            { repository(owner: "%s", name: "%s") {
-                ... on Repository {
-                  ref(qualifiedName:"%s") {
-                    target {
-                      ... on Commit {
-                        history(first:%s,since:"%s"%s) {
-                          edges {
-                            node {oid id}
-                            cursor
-                          }
-                          pageInfo{hasNextPage}
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-            """  % (self.organization, repo, branch, self.pagesize, ref_time, cursor_clause)
-        return textwrap.dedent(query[1:])
-
-
-    def altConstructQuery(self, ref_time, commit_count, branch='master', cursor=None):
-        """
-            construct a GraphQL compliant query to specify commits in repos that happened since a specific time.
-        """
-        query = \
-            """
-              {search(first: %s, type: REPOSITORY, query: "user:%s pushed:>%s") {
-                edges {
-                  node {
-                    ... on Repository {
-                      id
-                      name
-                      pushedAt
-                      ref(qualifiedName:"%s") {
-                        target {
-                          ... on Commit {
-                            history(first:%d, since:"%s"){
-                              edges {
-                                node { oid message committer{name} committedDate tree{entries{name}}
-                                cursor
-                              }
-                            }
-                          }
-                        }
-                      }
-                     }}}
-                     cursor
-                  }
-                  pageInfo{hasNextPage}
-                  repositoryCount
-                }
-            }
-            """ % (self.pagesize, self.organization, ref_time, "master", 10, ref_time)
-
-        commit_spec     = self.graphQL_commitSpec(ref_time, commit_count)[9:]
-        repository_spec = self.graphQL_repositorySpec(branch)[8:]
-        search_spec     = self.graphQL_repoSearchSpec(self.organization, ref_time, branch, 100)
-        full_repo_spec = repository_spec.replace('<< commit_spec >>', commit_spec)
-        full_query = search_spec.replace('<< repository_spec >>', full_repo_spec)
-        return "{%s\n}" % textwrap.indent(full_query, '  ')
-
-    def graphQL_repoSearchSpec(self, owner, ref_time, branch, count, cursor=None):
-        search_spec = \
-        """
-        search(first: %d, %s type: REPOSITORY, query: "user:%s pushed:>%s")
-        {
-          edges
-          {
-            node
-            {
-               << repository_spec >>
-            }
-            cursor
-          }
-          pageInfo {hasNextPage}
-          repositoryCount
-        }"""
-        cursor_clause = "after: %s, " if cursor else ''
-        result = search_spec % (count, cursor_clause, owner, ref_time)
-        return textwrap.dedent(result)
-
-    def graphQL_repositorySpec(self, branch):
-        repository_spec = \
-        """
-        ... on Repository
-        {
-          id
-          name
-          pushedAt
-          ref(qualifiedName:"%s")
-          {
-            << commit_spec >>
-          }
-        }"""
-        return repository_spec % branch
-
-    def graphQL_commitSpec(self, ref_time, count):
-        commit_spec = \
-        """
-        target
-            {
-              ... on Commit
-              {
-                history(first:%d, since:"%s")
-                {
-                  edges
-                  {
-                    node  { oid message committer {name date} committedDate tree {entries {name}} }
-                    cursor
-                  }
-                  pageInfo {hasNextPage}
-                }
-              }
-            }"""
-        return commit_spec % (count, ref_time)
 
 
     def repoCommits(self, repo):
@@ -273,11 +122,10 @@ class Pager:
     #     return commit
 
 
-    def getCommitsPage(self, repo, ref_time, repo_commits, cursor=None):
+    def getCommitsPage(self, organization, repo, ref_time, repo_commits, pagesize, cursor=None):
         while self.next_commits_page:
             #query     = self.constructCommitsQuery(repo)
-            #response = requests.post(self.url, json.dumps({"query": query}), auth=(self.user, self.token))
-            query = self.altConstructCommitsQuery(repo, ref_time, branch='master', cursor=cursor)
+            query = GraphQL_Query.constructCommitsQuery(organization, repo, ref_time, pagesize, branch='master', cursor=cursor)
             response = requests.post(self.url, json.dumps({"query": query}), auth=(self.user, self.token))
             result = response.json()
             result = self.validateCommitStructure(result)
@@ -289,7 +137,7 @@ class Pager:
                 repo_commits.append(commit['node']['oid'])
                 if commit['node']['id'] == self.last_commit_id and self.next_commits_page:
                     self.commit_cursor = commit['cursor']
-                    self.getCommitsPage(repo, ref_time, repo_commits, cursor=commit['cursor'])
+                    self.getCommitsPage(organization, repo, ref_time, repo_commits, pagesize, cursor=commit['cursor'])
 
 
     def resetCommitsPageDefaults(self):
@@ -304,16 +152,18 @@ class Pager:
             return
 
         commits = []
-        self.getCommitsPage(repo['name'], ref_time, commits)
+        COMMITS_PAGE_SIZE = 100
+        self.getCommitsPage(self.organization, repo['name'], ref_time, commits, COMMITS_PAGE_SIZE)
         self.resetCommitsPageDefaults()
 
         return commits
 
 
     def processActiveRepositories(self, ref_time, commit_count, cursor=None):
+        REPOS_PAGE_SIZE = 100
         while self.next_repos_page:
             #query = self.constructRepoQuery()
-            query = self.altConstructQuery(ref_time, commit_count, branch='master')
+            query = GraphQL_Query.constructRepoActivityQuery(self.organization, ref_time, REPOS_PAGE_SIZE, commit_count, branch='master')
             response = requests.post(self.url, json.dumps({"query": query}), auth=(self.user, self.token))
             result = response.json()['data']['search']
 
@@ -388,41 +238,6 @@ class Pager:
                     print(ghc)
                 sys.stdout.flush()
 
-
-######################################################################################
-
-class GithubCommit:
-    def __init__(self, response, repo_name, sha):
-        self.sha = sha
-        self.repo_name = repo_name
-        self.status = response.status_code
-
-        if response.status_code in [200, 403]:
-            store = response.headers._store
-            self.captureRateLimitInfo(store)
-
-        if response.status_code == 200:
-            payload = response.json()
-            self.captureCommitInfo(payload)
-
-    def captureRateLimitInfo(self, store):
-        self.rate_limit = store['x-ratelimit-limit'][1]
-        self.remaining  = store['x-ratelimit-remaining'][1]
-        reset_time      = store['x-ratelimit-reset'][1]
-        self.reset_time = datetime.fromtimestamp(int(reset_time))
-
-    def captureCommitInfo(self, payload):
-        commit_info = payload['commit']
-        committer   = commit_info['committer']
-        self.timestamp = committer['date']
-        self.committer = (committer['name'], committer['email'])
-        self.message   = commit_info['message']
-        self.involved_files = [(file['status'], file['filename']) for file in payload['files']]
-
-    def __str__(self):
-        return "%s - %s %s %s %s %s" % \
-               (self.repo_name, self.sha, self.timestamp, repr(self.committer),
-                self.message[:50], repr(self.involved_files))
 
 ######################################################################################
 ######################################################################################
